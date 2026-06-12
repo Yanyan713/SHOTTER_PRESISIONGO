@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SHOOTER PRESISIONGO</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #0a0a0a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+        #gameContainer {
+            position: relative;
+            border: 4px solid #00ff00;
+            box-shadow: 0 0 20px #00ff0066, inset 0 0 20px #00ff0022;
+        }
+        canvas {
+            display: block;
+            image-rendering: pixelated;
+        }
+        .scanlines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(0, 0, 0, 0.3) 2px,
+                rgba(0, 0, 0, 0.3) 4px
+            );
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="game" width="1240" height="900"></canvas>
+        <div class="scanlines"></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+        const W = 1240, H = 900;
+
+        // Game state
+        let state = 'menu'; // menu, playing, boss, victory, defeat
+        let controlScheme = 'WASD'; // WASD or ZQSD
+        let score = 0;
+        let targets = [];
+        let level = 1;
+        let maxLevel = 10;
+        let levelProgress = 0;
+        let bossHP = 100;
+        let playerHP = 100;
+        let bossSpawned = false;
+        let boss = null;
+        let shots = 0;
+        let hits = 0;
+        let completion = 0;
+        let crosshairX = W / 2;
+        let crosshairY = H / 2;
+        let particles = [];
+        let hitEffects = [];
+        let menuSelection = 0;
+        let frameCount = 0;
+
+        const keys = {};
+
+        // Controls mapping
+        const controls = {
+            up: controlScheme === 'WASD' ? 'KeyW' : 'KeyZ',
+            down: controlScheme === 'WASD' ? 'KeyS' : 'KeyS',
+            left: controlScheme === 'WASD' ? 'KeyA' : 'KeyQ',
+            right: controlScheme === 'WASD' ? 'KeyD' : 'KeyD'
+        };
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+
+            if (state === 'menu') {
+                if (e.code === 'Enter' || e.code === 'Space') {
+                    state = 'playing';
+                    initLevel();
+                }
+            }
+
+            if (state === 'playing' || state === 'boss') {
+                if (e.code === 'Space' || e.code === 'Enter') {
+                    shoot();
+                }
+            }
+
+            if (state === 'victory' || state === 'defeat') {
+                if (e.code === 'Enter' || e.code === 'Space') {
+                    resetGame();
+                }
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = W / rect.width;
+            const scaleY = H / rect.height;
+            crosshairX = (e.clientX - rect.left) * scaleX;
+            crosshairY = (e.clientY - rect.top) * scaleY;
+        });
+
+        canvas.addEventListener('click', () => {
+            if (state === 'playing' || state === 'boss') {
+                shoot();
+            }
+        });
+
+        function shoot() {
+            shots++;
+            let hitTarget = false;
+
+            if (state === 'boss' && boss) {
+                const dx = crosshairX - boss.x;
+                const dy = crosshairY - boss.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < boss.radius + 15) {
+                    hits++;
+                    bossHP -= getBossDamage();
+                    createParticles(boss.x, boss.y, '#ff0000');
+                    hitTarget = true;
+                    if (bossHP <= 0) {
+                        state = 'victory';
+                        completion = 100;
+                    }
+                }
+            } else {
+                // Check targets in reverse order (front to back)
+                for (let i = targets.length - 1; i >= 0; i--) {
+                    const t = targets[i];
+                    if (t.hit || t.missed) continue;
+                    const dx = crosshairX - t.x;
+                    const dy = crosshairY - t.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    // Larger hit box for easier targeting
+                    if (dist < t.radius + 20) {
+                        hits++;
+                        t.hit = true;
+                        createParticles(t.x, t.y, '#ffff00');
+                        hitEffects.push({x: t.x, y: t.y, radius: t.radius, life: 30});
+                        hitTarget = true;
+                        score += Math.floor(100 * t.depth);
+                        break;
+                    }
+                }
+            }
+
+            if (!hitTarget) {
+                createParticles(crosshairX, crosshairY, '#888888');
+            }
+        }
+
+        function getBossDamage() {
+            // Damage is lower when completion is high (harder boss)
+            return Math.max(2, 15 - completion * 0.1);
+        }
+
+        function getBossHP() {
+            // HP increases based on completion percentage
+            return 50 + completion * 5;
+        }
+
+        function getBossSpeed() {
+            // Speed increases based on completion percentage
+            return 0.5 + completion * 0.03;
+        }
+
+        function getBossSize() {
+            // Boss gets smaller when completion is high
+            return Math.max(20, 40 - completion * 0.15);
+        }
+
+        function createParticles(x, y, color) {
+            for (let i = 0; i < 8; i++) {
+                particles.push({
+                    x, y,
+                    vx: (Math.random() - 0.5) * 4,
+                    vy: (Math.random() - 0.5) * 4,
+                    life: 20,
+                    color
+                });
+            }
+        }
+
+        function initLevel() {
+            targets = [];
+            levelProgress = 0;
+            const numTargets = Math.min(3 + level, 10);
+
+            // Difficulty: targets disappear between 35-50 seconds
+            const minTime = Math.max(1050, 1500 - level * 30); // frames (35-50 sec at 30fps)
+            const maxTime = Math.max(1350, 1800 - level * 45);
+
+            for (let i = 0; i < numTargets; i++) {
+                const depth = 0.3 + (i / numTargets) * 0.7;
+                const lifetime = minTime + Math.random() * (maxTime - minTime);
+                targets.push({
+                    x: 200 + Math.random() * 840,
+                    y: 200 + Math.random() * 400,
+                    radius: Math.max(15, 50 - depth * 20 - level * 2),
+                    depth: depth,
+                    hit: false,
+                    pulse: Math.random() * Math.PI * 2,
+                    lifetime: lifetime,
+                    maxLifetime: lifetime,
+                    missed: false
+                });
+            }
+        }
+
+        function spawnBoss() {
+            boss = {
+                x: W / 2,
+                y: H / 2,
+                vx: getBossSpeed(),
+                vy: getBossSpeed(),
+                radius: getBossSize(),
+                angle: 0
+            };
+            bossHP = getBossHP();
+            state = 'boss';
+        }
+
+        function updateTargets() {
+            for (const t of targets) {
+                if (!t.hit && !t.missed && t.lifetime > 0) {
+                    t.lifetime--;
+                    if (t.lifetime <= 0) {
+                        t.missed = true;
+                    }
+                }
+            }
+        }
+
+        function updateBoss() {
+            if (!boss) return;
+            boss.x += boss.vx;
+            boss.y += boss.vy;
+            boss.angle += 0.1;
+
+            if (boss.x < 30 || boss.x > W - 30) boss.vx *= -1;
+            if (boss.y < 30 || boss.y > H - 30) boss.vy *= -1;
+
+            // More erratic movement at higher completion
+            if (completion > 50 && Math.random() < 0.1) {
+                boss.vx += (Math.random() - 0.5) * 0.5;
+                boss.vy += (Math.random() - 0.5) * 0.5;
+            }
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life--;
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            for (let i = hitEffects.length - 1; i >= 0; i--) {
+                const h = hitEffects[i];
+                h.life--;
+                if (h.life <= 0) {
+                    hitEffects.splice(i, 1);
+                }
+            }
+        }
+
+        function updateCrosshair() {
+            // Crosshair only moves with mouse, no keyboard movement needed
+        }
+
+        function checkLevelComplete() {
+            // Level complete when all targets are either hit or missed
+            if (targets.every(t => t.hit || t.missed)) {
+                // Calculate completion based on hits vs total targets
+                const hitCount = targets.filter(t => t.hit).length;
+                const totalTargets = targets.length;
+
+                level++;
+                if (level > maxLevel) {
+                    completion = Math.min(100, Math.floor((hitCount / totalTargets) * 100));
+                    spawnBoss();
+                } else {
+                    initLevel();
+                }
+            }
+        }
+
+        function update() {
+            frameCount++;
+            updateParticles();
+            updateCrosshair();
+
+            if (state === 'playing') {
+                updateParticles();
+                updateTargets();
+                checkLevelComplete();
+            }
+
+            if (state === 'boss') {
+                updateBoss();
+            }
+        }
+
+        // Pseudo-3D perspective grid
+        function drawBackground() {
+            // Sky gradient
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+            skyGrad.addColorStop(0, '#1a0a2e');
+            skyGrad.addColorStop(0.5, '#16213e');
+            skyGrad.addColorStop(1, '#0f3460');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // Stars
+            ctx.fillStyle = '#ffffff';
+            for (let i = 0; i < 30; i++) {
+                const x = (i * 37 + frameCount * 0.1) % W;
+                const y = (i * 23) % (H * 0.6);
+                const size = (i % 3) + 1;
+                ctx.fillRect(x, y, size, size);
+            }
+
+            // Ground with perspective
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, H * 0.7, W, H * 0.3);
+
+            // Perspective grid lines
+            ctx.strokeStyle = '#00ff0033';
+            ctx.lineWidth = 1;
+
+            // Horizontal lines with perspective
+            for (let i = 0; i < 8; i++) {
+                const y = H * 0.7 + (i * i * 2);
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(W, y);
+                ctx.stroke();
+            }
+
+            // Vertical lines converging to center
+            const vanishX = W / 2;
+            const vanishY = H * 0.4;
+            for (let i = 0; i <= 10; i++) {
+                const x = (i / 10) * W;
+                ctx.beginPath();
+                ctx.moveTo(x, H * 0.7);
+                ctx.lineTo(vanishX + (x - vanishX) * 0.3, vanishY);
+                ctx.stroke();
+            }
+        }
+
+        function drawTarget(t) {
+            const pulse = Math.sin(frameCount * 0.1 + t.pulse) * 2;
+            const r = t.radius + pulse;
+
+            // Shadow for depth
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.beginPath();
+            ctx.ellipse(t.x + 3, t.y + 5, r, r * 0.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Outer ring (3D effect)
+            ctx.strokeStyle = '#ff6600';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, r + 4, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Target body
+            const grad = ctx.createRadialGradient(t.x - r/3, t.y - r/3, 0, t.x, t.y, r);
+            grad.addColorStop(0, '#ffff00');
+            grad.addColorStop(0.5, '#ff8800');
+            grad.addColorStop(1, '#ff4400');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, r, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Inner rings
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, r * 0.6, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, r * 0.3, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Center dot
+            ctx.fillStyle = '#ff0000';
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Timer bar (shrinks as time runs out)
+            const timerWidth = 50;
+            const timerHeight = 6;
+            const timerX = t.x - timerWidth / 2;
+            const timerY = t.y + r + 15;
+            const timeRatio = t.lifetime / t.maxLifetime;
+
+            ctx.fillStyle = '#333';
+            ctx.fillRect(timerX, timerY, timerWidth, timerHeight);
+
+            // Color changes from green to yellow to red
+            if (timeRatio > 0.5) {
+                ctx.fillStyle = '#00ff00';
+            } else if (timeRatio > 0.25) {
+                ctx.fillStyle = '#ffff00';
+            } else {
+                ctx.fillStyle = '#ff0000';
+            }
+            ctx.fillRect(timerX, timerY, timerWidth * timeRatio, timerHeight);
+
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(timerX, timerY, timerWidth, timerHeight);
+
+            // Depth indicator (small text)
+            ctx.fillStyle = '#888888';
+            ctx.font = '10px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${Math.ceil(t.lifetime / 30)}s`, t.x, timerY + timerHeight + 12);
+        }
+
+        function drawBoss() {
+            if (!boss) return;
+
+            const b = boss;
+
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.beginPath();
+            ctx.ellipse(b.x + 5, b.y + 8, b.radius * 1.2, b.radius * 0.6, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Outer glow
+            ctx.shadowColor = '#ff0000';
+            ctx.shadowBlur = 20;
+
+            // Main body with rotation effect
+            ctx.save();
+            ctx.translate(b.x, b.y);
+            ctx.rotate(b.angle);
+
+            // Polygon shape for boss
+            ctx.fillStyle = '#880000';
+            ctx.beginPath();
+            const sides = 6;
+            for (let i = 0; i < sides; i++) {
+                const angle = (i / sides) * Math.PI * 2;
+                const x = Math.cos(angle) * b.radius;
+                const y = Math.sin(angle) * b.radius;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Inner detail
+            ctx.fillStyle = '#ff0000';
+            ctx.beginPath();
+            for (let i = 0; i < sides; i++) {
+                const angle = (i / sides) * Math.PI * 2 + 0.3;
+                const x = Math.cos(angle) * b.radius * 0.6;
+                const y = Math.sin(angle) * b.radius * 0.6;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Eye in center
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(0, 0, b.radius * 0.25, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.arc(0, 0, b.radius * 0.12, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            ctx.shadowBlur = 0;
+
+            // HP bar
+            const hpBarWidth = 80;
+            const hpBarHeight = 8;
+            const hpBarX = b.x - hpBarWidth / 2;
+            const hpBarY = b.y - b.radius - 20;
+
+            ctx.fillStyle = '#333';
+            ctx.fillRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+
+            const hpPercent = bossHP / getBossHP();
+            ctx.fillStyle = hpPercent > 0.5 ? '#00ff00' : hpPercent > 0.25 ? '#ffff00' : '#ff0000';
+            ctx.fillRect(hpBarX, hpBarY, hpBarWidth * hpPercent, hpBarHeight);
+
+            ctx.strokeStyle = '#ffffff';
+            ctx.strokeRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight);
+
+            // Label
+            ctx.fillStyle = '#ff0000';
+            ctx.font = 'bold 10px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('BOSS', b.x, hpBarY - 5);
+        }
+
+        function drawCrosshair() {
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 1;
+
+            // Crosshair
+            ctx.beginPath();
+            ctx.moveTo(crosshairX - 8, crosshairY);
+            ctx.lineTo(crosshairX - 3, crosshairY);
+            ctx.moveTo(crosshairX + 3, crosshairY);
+            ctx.lineTo(crosshairX + 8, crosshairY);
+            ctx.moveTo(crosshairX, crosshairY - 8);
+            ctx.lineTo(crosshairX, crosshairY - 3);
+            ctx.moveTo(crosshairX, crosshairY + 3);
+            ctx.lineTo(crosshairX, crosshairY + 8);
+            ctx.stroke();
+
+            // Center dot
+            ctx.fillStyle = '#00ff00';
+            ctx.beginPath();
+            ctx.arc(crosshairX, crosshairY, 1, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Outer circle
+            ctx.beginPath();
+            ctx.arc(crosshairX, crosshairY, 10, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        function drawParticles() {
+            for (const p of particles) {
+                ctx.globalAlpha = p.life / 20;
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function drawHitEffects() {
+            for (const h of hitEffects) {
+                ctx.globalAlpha = h.life / 30;
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(h.x, h.y, h.radius + (30 - h.life) * 2, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function drawHUD() {
+            ctx.font = '10px Courier New';
+            ctx.fillStyle = '#00ff00';
+            ctx.textAlign = 'left';
+
+            const accuracy = shots > 0 ? Math.floor((hits / shots) * 100) : 100;
+            ctx.fillText(`NIVEAU: ${level}/${maxLevel}`, 20, 40);
+            ctx.font = '18px Courier New';
+            ctx.fillText(`SCORE: ${score}`, 20, 70);
+            ctx.fillText(`PRECISION: ${accuracy}%`, 20, 100);
+
+            if (state === 'boss') {
+                ctx.fillStyle = '#ff0000';
+                ctx.font = 'bold 24px Courier New';
+                ctx.fillText('!!! BOSS !!!', W - 200, 50);
+            }
+        }
+
+        function drawMenu() {
+            drawBackground();
+
+            // Title
+            ctx.fillStyle = '#00ff00';
+            ctx.font = 'bold 56px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('SHOOTER', W / 2, 180);
+            ctx.fillStyle = '#ffff00';
+            ctx.fillText('PRESISIONGO', W / 2, 250);
+
+            // Subtitle
+            ctx.fillStyle = '#888888';
+            ctx.font = '20px Courier New';
+            ctx.fillText('CIBLEZ PRECISEMENT', W / 2, 300);
+
+            // Play button
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 28px Courier New';
+            ctx.fillText('> APPUYEZ ENTRÉE POUR JOUER <', W / 2, 400);
+
+            // Instructions
+            ctx.fillStyle = '#444444';
+            ctx.font = '16px Courier New';
+            ctx.fillText('CLIQUEZ POUR TIRER SUR LES CIBLES', W / 2, 500);
+            ctx.fillText('PLUS ELLES SONT LOIN, PLUS PETITES ELLES SONT', W / 2, 530);
+        }
+
+        function drawVictory() {
+            ctx.fillStyle = 'rgba(0,50,0,0.8)';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = '#00ff00';
+            ctx.font = 'bold 48px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('VICTOIRE!', W / 2, 350);
+
+            ctx.font = '24px Courier New';
+            ctx.fillText(`COMPLETION: ${completion}%`, W / 2, 450);
+            ctx.fillText(`SCORE FINAL: ${score}`, W / 2, 490);
+            ctx.fillText(`PRECISION: ${shots > 0 ? Math.floor((hits/shots)*100) : 0}%`, W / 2, 530);
+
+            ctx.fillStyle = '#ffff00';
+            ctx.fillText('LE BOSS A ETE VAINCU!', W / 2, 620);
+
+            ctx.fillStyle = '#888888';
+            ctx.font = '20px Courier New';
+            ctx.fillText('APPUYEZ ENTREE POUR REJOUER', W / 2, 720);
+        }
+
+        function drawDefeat() {
+            ctx.fillStyle = 'rgba(50,0,0,0.8)';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = '#ff0000';
+            ctx.font = 'bold 48px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('DEFAITE!', W / 2, 350);
+
+            ctx.font = '24px Courier New';
+            ctx.fillText(`COMPLETION: ${completion}%`, W / 2, 450);
+            ctx.fillText(`SCORE FINAL: ${score}`, W / 2, 490);
+
+            ctx.fillStyle = '#ffff00';
+            ctx.fillText('LE BOSS ETAIT TROP FORT!', W / 2, 580);
+            ctx.fillText('ESSAIEZ AVEC MOINS DE REUSSITE!', W / 2, 620);
+
+            ctx.fillStyle = '#888888';
+            ctx.font = '20px Courier New';
+            ctx.fillText('APPUYEZ ENTREE POUR REJOUER', W / 2, 720);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, W, H);
+
+            if (state === 'menu') {
+                drawMenu();
+            } else if (state === 'victory') {
+                drawBackground();
+                drawVictory();
+            } else if (state === 'defeat') {
+                drawBackground();
+                drawDefeat();
+            } else {
+                drawBackground();
+
+                for (const t of targets) {
+                    if (!t.hit && !t.missed) {
+                        drawTarget(t);
+                    }
+                }
+
+                if (state === 'boss') {
+                    drawBoss();
+                }
+
+                drawParticles();
+                drawHitEffects();
+                drawCrosshair();
+                drawHUD();
+
+                // Boss fight timer - boss wins after 30 seconds
+                if (state === 'boss' && frameCount % 1800 === 0) {
+                    // This would be a timeout, but for simplicity boss has HP only
+                }
+            }
+
+            // CRT effect overlay
+            ctx.fillStyle = 'rgba(0,0,0,0.1)';
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        function resetGame() {
+            state = 'menu';
+            score = 0;
+            level = 1;
+            shots = 0;
+            hits = 0;
+            completion = 0;
+            bossHP = 100;
+            playerHP = 100;
+            bossSpawned = false;
+            boss = null;
+            particles = [];
+            hitEffects = [];
+            menuSelection = 0;
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start game
+        gameLoop();
+    </script>
+</body>
+</html>
